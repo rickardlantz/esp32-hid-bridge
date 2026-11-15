@@ -1,0 +1,38 @@
+menu "Keyboard bridge"
+    config BRIDGE_KEYBOARD_NAME
+        string "Exact BLE keyboard name (empty selects first keyboard)"
+        default ""
+        help
+            Set this before pairing when multiple keyboards are nearby.
+            The selected peer address is remembered in NVS.
+    config BRIDGE_QMI8658
+        bool "Enable optional QMI8658 accelerometer"
+        default n
+        help
+            The USB-A ESP32-S3-LCD-1.47 has no onboard accelerometer.
+            Enable only with an external QMI8658 on the configured header pins.
+            Missing/unresponsive hardware falls back to the portrait layout.
+    if BRIDGE_QMI8658
+        config BRIDGE_IMU_SDA
+            int "External accelerometer SDA GPIO"
+            range 1 13
+            default 1
+        config BRIDGE_IMU_SCL
+            int "External accelerometer SCL GPIO"
+            range 1 13
+            default 2
+        config BRIDGE_IMU_ADDRESS
+            hex "QMI8658 I2C address"
+            range 0x6a 0x6b
+            default 0x6b
+        config BRIDGE_IMU_SWAP_XY
+            bool "Swap accelerometer X/Y to match screen axes"
+            default n
+        config BRIDGE_IMU_INVERT_X
+            bool "Invert screen X acceleration"
+            default n
+        config BRIDGE_IMU_INVERT_Y
+            bool "Invert screen Y acceleration"
+            default n
+    endif
+endmenu
