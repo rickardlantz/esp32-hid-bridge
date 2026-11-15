@@ -105,6 +105,23 @@ python -m serial.tools.miniterm /dev/ttyACM0 115200
 
 Exit miniterm with Ctrl+]. Use the actual new device path if its number changes.
 
+## RGB status light
+
+The onboard WS2812B RGB LED (GPIO38, RGB channel order) shows the bridge state:
+
+| Light | Meaning |
+| --- | --- |
+| Solid red | Starting, no matching keyboard found, connection/authentication failure, unsupported keyboard, or connected keyboard with USB unavailable |
+| Fast blue blink (5 Hz) | A BLE scan is in progress |
+| Slow blue blink (1 Hz) | Connecting, authenticating, entering a pairing PIN, or discovering the keyboard's reports |
+| Solid green | A supported keyboard is connected and USB is ready to forward input |
+
+Scans last five seconds. If no match is found, the light returns to red during
+the two-second retry interval, then blinks blue again for the next scan.
+Blinking runs in a dedicated task using the RMT/DMA LED driver; Bluetooth event
+callbacks only update its state. `Indicator: ...` transitions appear in console
+logs. Brightness is limited to 24/255 for the onboard indicator.
+
 ## Interactive serial console
 
 From this project, run:
@@ -259,6 +276,14 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain \
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain \
   main/orientation.c tests/orientation_test.c -o /tmp/orientation-test
 /tmp/orientation-test
+```
+
+RGB indicator state and blink timing tests:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain \
+  main/status_led_pattern.c tests/status_led_test.c -o /tmp/bridge-status-led-test
+/tmp/bridge-status-led-test
 ```
 
 `main/esp_hid_gap.c` and `.h` derive from Espressif's ESP-IDF 6.1

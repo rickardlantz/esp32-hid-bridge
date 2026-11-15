@@ -18,6 +18,7 @@
 #include "esp_hid_gap.h"
 #include "keyboard_layout.h"
 #include "display.h"
+#include "status_led.h"
 #include "driver/gpio.h"
 #include "esp_private/usb_phy.h"
 #include "soc/rtc_cntl_reg.h"
@@ -47,6 +48,7 @@ static void force_download_on_restart(void)
 
 static void enter_bootloader(void)
 {
+    status_led_set_link(LED_LINK_IDLE);
     display_status(SCREEN_STARTING, "ENTERING FLASH MODE");
     ESP_LOGI(TAG, "Switching to ROM USB Serial/JTAG bootloader");
     keyboard_report_t release = {0};
@@ -169,6 +171,7 @@ static void hid_event(void *arg, esp_event_base_t base, int32_t event, void *dat
             }
             display_status(usable ? SCREEN_CONNECTED : SCREEN_UNSUPPORTED,
                 usable ? esp_hidh_dev_name_get(p->open.dev) : "KEYBOARD REPORT FORMAT");
+            status_led_set_link(usable ? LED_LINK_CONNECTED : LED_LINK_IDLE);
             const uint8_t *addr = esp_hidh_dev_bda_get(p->open.dev);
             if (usable) {
                 memcpy(peer, addr, 6);
@@ -179,6 +182,7 @@ static void hid_event(void *arg, esp_event_base_t base, int32_t event, void *dat
             ESP_LOGI(TAG, "Keyboard connected: %s", esp_hidh_dev_name_get(p->open.dev));
             xEventGroupSetBits(link_events, LINK_UP | LINK_DONE);
         } else {
+            status_led_set_link(LED_LINK_IDLE);
             display_status(SCREEN_AUTH_FAILED, "CONNECTION FAILED");
             ESP_LOGW(TAG, "Connection failed: %s", esp_err_to_name(p->open.status));
             xEventGroupSetBits(link_events, LINK_DONE);
@@ -201,6 +205,7 @@ static void hid_event(void *arg, esp_event_base_t base, int32_t event, void *dat
         }
         break;
     case ESP_HIDH_CLOSE_EVENT:
+        status_led_set_link(LED_LINK_IDLE);
         display_status(SCREEN_SCANNING, "KEYBOARD DISCONNECTED");
         submit(NULL);
         xEventGroupClearBits(link_events, LINK_UP);
@@ -223,8 +228,10 @@ static void scan_task(void *arg)
         esp_hid_scan_result_t *results = NULL;
         ESP_LOGI(TAG, "Scanning for BLE keyboard (put keyboard in pairing mode)");
         display_status(SCREEN_SCANNING, have_peer ? "LOOKING FOR SAVED DEVICE" : "BLE KEYBOARDS ONLY");
+        status_led_set_link(LED_LINK_SCANNING);
         esp_hid_gap_set_target(have_peer ? peer : NULL);
         esp_err_t err = esp_hid_scan(5, &count, &results);
+        status_led_set_link(LED_LINK_IDLE);
         if (err != ESP_OK) ESP_LOGW(TAG, "Scan failed: %s", esp_err_to_name(err));
         esp_hid_scan_result_t *chosen = NULL;
         for (esp_hid_scan_result_t *r = results; r; r = r->next) {
@@ -240,6 +247,7 @@ static void scan_task(void *arg)
             }
         }
         if (chosen) {
+            status_led_set_link(LED_LINK_AUTHENTICATING);
             display_status(SCREEN_CONNECTING, chosen->name);
             uint8_t addr[6];
             memcpy(addr, chosen->bda, 6);
@@ -250,6 +258,8 @@ static void scan_task(void *arg)
             if (esp_hidh_dev_open(addr, ESP_HID_TRANSPORT_BLE, addr_type)) {
                 // No overlapping connection attempts. Stack reports completion/failure.
                 xEventGroupWaitBits(link_events, LINK_DONE, pdTRUE, pdFALSE, portMAX_DELAY);
+            } else {
+                status_led_set_link(LED_LINK_IDLE);
             }
         }
         esp_hid_scan_results_free(results);
@@ -265,6 +275,7 @@ static void usb_task(void *arg)
     for (;;) {
         bool mounted = tud_mounted() && !tud_suspended();
         display_usb(mounted);
+        status_led_set_usb(mounted);
         if (!mounted) {
             // Never replay buffered keystrokes when a PC reconnects.
             xQueueReset(reports);
@@ -348,6 +359,7 @@ static void console_task(void *arg)
                 if (err != ESP_ERR_NVS_NOT_FOUND) ESP_ERROR_CHECK(err);
                 ESP_ERROR_CHECK(nvs_commit(settings));
                 ESP_LOGI(TAG, "Forgot keyboard; restarting into pairing mode");
+                status_led_set_link(LED_LINK_IDLE);
                 display_status(SCREEN_STARTING, "KEYBOARD FORGOTTEN");
                 vTaskDelay(pdMS_TO_TICKS(1500));
                 esp_restart();
@@ -366,6 +378,7 @@ static void console_task(void *arg)
 
 void app_main(void)
 {
+    status_led_init();
     gpio_config_t boot = {
         .pin_bit_mask = 1ULL << GPIO_NUM_0, .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,

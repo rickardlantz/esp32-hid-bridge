@@ -16,6 +16,7 @@
 
 #include "esp_hid_gap.h"
 #include "display.h"
+#include "status_led.h"
 #if CONFIG_BT_BLUEDROID_ENABLED
 #include "esp_bt_device.h"
 #endif
@@ -649,6 +650,7 @@ static void ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_p
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
         display_auth_complete(param->ble_security.auth_cmpl.success);
         if (!param->ble_security.auth_cmpl.success) {
+            status_led_set_link(LED_LINK_IDLE);
             ESP_LOGE(TAG, "BLE GAP AUTH ERROR: 0x%x", param->ble_security.auth_cmpl.fail_reason);
         } else {
             ESP_LOGI(TAG, "BLE GAP AUTH SUCCESS");
