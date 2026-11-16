@@ -1,10 +1,36 @@
-# BLE keyboard → USB HID bridge
+# BLE / Deskflow → USB input bridge
 
-Firmware for the Waveshare **ESP32-S3-LCD-1.47 USB-A stick** (non-touch,
-revision 0.2, 16 MB flash, 8 MB PSRAM).
+Firmware for the Waveshare **ESP32-S3-LCD-1.47 USB-A stick** and
+**ESP32-S3-LCD-1.47B USB-C board** (16 MB flash, 8 MB PSRAM).
 Built with the installed ESP-IDF 6.1. The computer sees a standard USB boot
-keyboard plus a USB CDC serial console. No computer-side keyboard driver or
+keyboard/mouse, a USB CDC serial console, and a writable configuration drive. No computer-side keyboard driver or
 input-injection application is needed.
+
+## Board selection
+
+Both boards run the same application with a different build profile:
+
+| Board | Backlight | Accelerometer | Update command |
+| --- | --- | --- | --- |
+| ESP32-S3-LCD-1.47 USB-A | GPIO48 | Optional external QMI8658; disabled by default | `bash tools/flash.sh` |
+| ESP32-S3-LCD-1.47B USB-C | GPIO46 | Onboard QMI8658, SDA48/SCL47, address 0x6B | `bash tools/flash.sh --board lcd-147b` |
+
+The B profile enables its onboard accelerometer by default; it can still be
+disabled in menuconfig, and missing/failed hardware retains the portrait fallback.
+`main/board.h` centralizes wiring, while display/orientation and input/network
+logic remain shared. The B profile has its own SDK configuration and build under
+`build/lcd-147b`, preserving the original USB-A build and defaults.
+
+```sh
+source ~/.espressif/tools/activate_idf_v6.1.sh
+idf.py -B build/lcd-147b menuconfig  # after the first B-profile build
+```
+
+The boards share LCD SPI pins and the RGB LED on GPIO38. Pin assignments follow
+the [Waveshare B documentation](https://docs.waveshare.com/ESP32-S3-LCD-1.47B)
+and [schematic](https://files.waveshare.com/wiki/ESP32-S3-LCD-1.47B/ESP32-S3-LCD-1.47B_schematic_diagram.pdf).
+Select the correct profile rather than installing the USB-A binary on the B:
+GPIO48 is an I2C data pin on the B, not its backlight.
 
 ## Build and install
 
@@ -73,9 +99,8 @@ applied by the ST7789 driver; the renderer only needs the logical viewport.
 
 The USB-A ESP32-S3-LCD-1.47 has **no onboard accelerometer**, as shown in its
 [schematic](https://files.waveshare.com/wiki/ESP32-S3-LCD-1.47/ESP32-S3-LCD-1.47_schematic_diagram.pdf).
-The [1.47B](https://docs.waveshare.com/ESP32-S3-LCD-1.47B) has a QMI8658, but is
-a different board with different backlight wiring. This firmware does not
-silently substitute that board's wiring.
+The [1.47B](https://docs.waveshare.com/ESP32-S3-LCD-1.47B) has a QMI8658 and different backlight wiring. Select the B profile above
+to use it; the firmware never silently substitutes one board’s wiring for another.
 
 For an external QMI8658C, enable **Keyboard bridge → Enable optional QMI8658
 accelerometer** in `idf.py menuconfig`, then configure SDA/SCL on the expansion
@@ -83,7 +108,7 @@ header and address 0x6A or 0x6B. The backend is off by default and touches no I2
 pins when off. Mount the sensor parallel to the display and configure X/Y
 swap/inversion to align its axes with the screen. The implementation follows
 the [QMI8658C datasheet](https://files.waveshare.com/upload/3/36/QMI8658C_datasheet_rev_0.8.pdf).
-This external hardware path compiles but has not been tested on a physical IMU.
+The external-sensor wiring path requires separate hardware validation.
 
 Automatic rotation requires a dominant gravity axis held for 500 ms. Diagonal,
 flat, free-fall, and high-acceleration samples keep the last orientation instead
@@ -113,10 +138,18 @@ The onboard WS2812B RGB LED (GPIO38, RGB channel order) shows the bridge state:
 | --- | --- |
 | Solid red | Starting, no matching keyboard found, connection/authentication failure, unsupported keyboard, or connected keyboard with USB unavailable |
 | Fast blue blink (5 Hz) | A BLE scan is in progress |
+| Fast orange blink (5 Hz) | Searching for / connecting to Wi-Fi |
+| Solid orange | Wi-Fi connected; Deskflow disconnected |
+| Slow turquoise blink (1 Hz) | Connecting to Deskflow |
+| Solid turquoise | Deskflow connected |
 | Slow blue blink (1 Hz) | Connecting, authenticating, entering a pairing PIN, or discovering the keyboard's reports |
 | Solid green | A supported keyboard is connected and USB is ready to forward input |
 
-Scans last five seconds. If no match is found, the light returns to red during
+Network stages take priority over Bluetooth status. With no active Wi-Fi profile,
+the original Bluetooth red/blue/green indications apply. Solid turquoise means
+Deskflow is connected; the display and diagnostic log separately report USB readiness.
+
+BLE scans last five seconds. If no match is found, the light returns to red during
 the two-second retry interval, then blinks blue again for the next scan.
 Blinking runs in a dedicated task using the RMT/DMA LED driver; Bluetooth event
 callbacks only update its state. `Indicator: ...` transitions appear in console
@@ -144,6 +177,8 @@ free for flashing. Close other serial monitors before starting it.
 | Key | Action |
 | --- | --- |
 | `S` | Request device status |
+| `N` | Request Wi-Fi and Deskflow status |
+| `C` | Reload configuration |
 | `O` | Select any orientation or automatic mode with arrows and Enter |
 | `F` | Forget keyboard and restart pairing; confirm with `Y` |
 | `B` | Enter ROM bootloader; confirm with `Y` |
@@ -161,7 +196,7 @@ current buffer; `L` records future events until stopped. Options:
 
 ```sh
 bash tools/console.sh --list-ports
-bash tools/console.sh --port /dev/serial/by-id/usb-ESP_Bridge_BLE_USB_Keyboard_A0F262E39B84-if00
+bash tools/console.sh --port /dev/serial/by-id/usb-ESP_Bridge_ESP_Input_Bridge_A0F262E39B84-if00
 bash tools/console.sh --dump-dir /tmp/bridge-logs --record /tmp/bridge-session.log
 ```
 
@@ -173,6 +208,60 @@ snapshot/recording, cancelling a forget prompt, and bootloader → external flas
 → automatic reconnection. The MX Keys Mini also reconnected after that update.
 Protocol, buffering, capture and serial lifecycle tests run with
 `python tests/console_test.py` in the ESP-IDF environment.
+
+## X11 server: keyboard/scroll work but pointer is stuck
+
+The Arch test laptop's Cinnamon 6.8.0 / Muffin 6.8.1 applied a 2× Coordinate
+Transformation Matrix to its touchpad and XTEST pointer. This corrupts relative
+movement after Deskflow warps the source pointer, causing immediate screen exits
+and movement clamped to the remote screen's corner. It matches
+[Muffin issue #888](https://github.com/linuxmint/muffin/issues/888), whose upstream
+fix reverts the coordinate scaling change. This is a server desktop issue.
+
+Check the server with `xinput list-props "Virtual core XTEST pointer"` and the
+corresponding touchpad/mouse name from `xinput list`. For this specific 2× bug,
+the temporary runtime workaround is:
+
+```sh
+xinput set-prop "Virtual core XTEST pointer" "Coordinate Transformation Matrix" 1 0 0 0 1 0 0 0 1
+xinput set-prop "YOUR TOUCHPAD NAME" "Coordinate Transformation Matrix" 1 0 0 0 1 0 0 0 1
+```
+
+Apply only to affected devices; preserve deliberate rotated/mapped-device matrices.
+The desktop may reapply its matrix after login or device/display changes. The
+runtime test on this laptop reproduced `(981,801)` after warping to `(500,400)`
+and moving `(-10,0)` with its 2× matrix; identity correctly produced `(490,400)`.
+The ESP's direct square test was confirmed on both macOS and Android.
+
+`tools/deskflow_trace_proxy.py` is an optional plain-TCP protocol diagnostic. It
+forwards traffic and logs pointer positions/focus messages, without keyboard
+contents. Its default listener is port 24801 and upstream is localhost:24800;
+temporarily point the ESP's `port` to that listener, then restore 24800 afterward.
+
+## Temporary persistent pointer diagnostics
+
+Use `trace on` in the serial console to enable a bounded diagnostic ring in NVS.
+It records the last 32 pointer/focus/USB diagnostic lines, without recording
+keystrokes or passwords. It remains enabled across reboots so the ESP can be
+moved to another USB host. Saves occur every three seconds when records change;
+wait four seconds after testing before unplugging. Each boot's capture stops
+automatically after ten minutes; `trace off` stops it earlier.
+
+After reconnecting to the development machine, `trace dump` prints the retained
+log. `trace clear` erases it. NVS is separate from the USB configuration drive;
+firmware never writes diagnostic files into the mounted host filesystem.
+
+For an independent USB motion check, `mouse-test` waits five seconds, then moves
+an 80-pixel square without clicking. `mouse-test-next` arms that test once for
+the next boot, allowing a different host to be tested. Pause Deskflow during the
+test to avoid mixing server input with generated motion. The display shows when
+the test runs. A test that never starts, together with `mounted=0`, indicates
+that the USB host did not configure the device. Enumeration counters distinguish
+host reset/setup activity from a connection supplying power alone. USB device
+revision 2.00 identifies the current HID layout.
+
+The combined HID interface advertises the generic report protocol,
+with TinyUSB's standard keyboard and mouse descriptors.
 
 ## Pair a keyboard
 
@@ -216,6 +305,112 @@ that pairing on the keyboard or choose a fresh pairing slot too.
   state instead of replaying buffered keystrokes. Remote wake is not implemented.
 - Queue overflow inserts a release before the latest report to avoid stuck keys.
 
+## Wi-Fi and Deskflow
+
+The USB configuration drive exposes approximately 13 MB of internal flash, separate
+from firmware and private NVS settings. Open `CONFIG.INI`; each section names a
+Wi-Fi SSID. Up to eight profiles are supported, tried in file order:
+
+```ini
+[Your WiFi SSID]
+password = your-wifi-password
+server = 192.168.1.10
+port = 24800
+screen = esp-bridge
+width = 1920
+height = 1080
+layout = se
+tls = true
+server_fingerprint = YOUR_SERVER_CERTIFICATE_SHA256
+enabled = true
+```
+
+Add `esp-bridge` to the Deskflow server's screen arrangement. The ESP initiates
+an outgoing connection to that server, then forwards its keyboard and mouse
+input to the computer attached by USB. Width and height describe that computer's
+screen. `layout` accepts `us` (default) or `se`; match the target computer's keyboard
+layout. Deskflow takes input focus when the server enters its screen; leaving it
+releases remote input and restores the Bluetooth keyboard state.
+
+Passwords are stored as plain text as requested. Empty passwords select an open
+network. Values may be quoted; full-line comments start with `;` or `#`.
+Unknown keys and invalid profiles reject the entire edit and retain the previous
+configuration. `enabled=false` disables a profile without removing it.
+
+TLS defaults to enabled and requires the SHA-256 fingerprint of the server's
+certificate: 64 hexadecimal digits, optionally separated by colons. Obtain it
+from Deskflow's certificate information, or from its certificate file:
+
+```sh
+openssl x509 -in server.pem -noout -fingerprint -sha256
+```
+
+For servers requiring client certificates, place a PEM certificate and its
+unencrypted matching private key in the drive root, then add:
+
+```ini
+client_cert = CLIENT.CRT
+client_key = CLIENT.KEY
+```
+
+Trust that client's certificate fingerprint on the Deskflow server. Both filenames
+must use the 8.3 format; each file is limited to 4096 bytes. For a prototype
+without encryption, set `tls=false` and disable encryption on the Deskflow server.
+
+### Relative movement and locked switching
+
+For targets with different screen sizes, enable Deskflow server settings
+`relativeMouseMoves=true` and `defaultLockToComputerState=true`. Locked sessions
+send relative movement directly, avoiding automatic exits at Deskflow's logical
+screen boundaries. These are server settings; the ESP cannot force them through
+the client protocol.
+
+The development laptop is configured with these shortcuts:
+
+- **Ctrl+Alt+Shift+1**: unlock, switch to `esp-bridge`, then lock.
+- **Ctrl+Alt+Shift+2**: unlock, switch to `arch-dual256`, then lock.
+- **Scroll Lock**: toggle locking on the current computer.
+
+Deskflow starts locked to the laptop; use the shortcuts to switch computers.
+The settings are saved in `~/.config/Deskflow/Deskflow.conf` and are visible in
+the GUI. Keyboard and mouse support in firmware handles both relative packets
+and ordinary Deskflow absolute coordinates.
+
+### Live configuration
+
+Saving while the drive remains mounted triggers a reload after USB writes settle
+(typically two to three seconds after the operating system flushes them). Use
+`sync` if the host caches writes. Firmware reads consistent, bounded FAT snapshots;
+it does not mount or modify the filesystem alongside the host.
+
+Only affected services restart: changing Deskflow settings or certificate files
+reconnects Deskflow; changing the active Wi-Fi credentials reconnects Wi-Fi.
+Unchanged settings do not cause reconnections. Invalid saves and transient empty
+files keep the last accepted configuration, also saved in NVS for recovery after
+reboot. To disable the final profile, use `enabled=false` rather than deleting
+all sections. Console commands `network` and `reload` show status and request a
+fresh read. `restart` reboots the bridge, releasing a captured pointer. The display
+also shows network status. Motion diagnostics in the serial log report received
+absolute/relative Deskflow packets, ignored packets with focus/acknowledgement
+state, and successfully queued USB movements. These are rate limited to one log
+per two seconds during motion.
+
+The Wi-Fi manager owns AP selection, credentials and DHCP. Deskflow session,
+protocol framing, socket/TLS transport, and certificate authentication have separate
+modules. Wi-Fi and Deskflow configuration structs remain separate even though
+the INI parser combines them under each SSID.
+
+Deskflow support includes protocol 1.1–1.8 framing, keyboard press/release,
+absolute/relative Deskflow mouse motion converted to a relative USB mouse,
+five buttons, scrolling, heartbeat and disconnect
+cleanup. Clipboard, file transfer, media keys and IME synchronization are not
+forwarded. The USB mouse uses conventional signed 8-bit X/Y fields; larger movements are
+split into multiple reports without duplicating scroll input. Android cursor
+compatibility still requires hardware confirmation. Host pointer
+acceleration can make its position differ from Deskflow’s logical screen position;
+entering the screen establishes a new movement baseline without moving the cursor.
+Deskflow sessions use turquoise; Wi-Fi without Deskflow uses orange.
+
 ## Future phone input
 
 The phone app is not implemented in this version. A future custom GATT service
@@ -243,6 +438,38 @@ esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0 backups/original-esp32s
 ```
 
 ## Validation
+
+The current composite firmware was built and flashed to the connected ESP.
+Linux enumerated keyboard, mouse, CDC and mass storage (`303a:4007`), mounted the
+configuration drive, and received console status replies. A valid configuration
+save applied while mounted; an invalid edit retained the previous settings.
+Wi-Fi and Deskflow keyboard, mouse, scrolling and key combinations were verified
+on the original USB-A stick with macOS and Android targets. The server’s Muffin
+coordinate-transform issue was reproduced and worked around as described above.
+TLS interoperability with a real server still requires validation.
+
+The 1.47B profile was built and flashed. Its USB interfaces, display and onboard
+accelerometer were verified, and the user confirmed upright automatic rotation.
+Its full 16 MB factory flash backup was hashed and checked. Wi-Fi association
+succeeded, but stable Deskflow connectivity on this second board remains unverified.
+
+Native INI and Deskflow tests cover configuration validation, fragmented frames,
+handshakes, keyboard/mouse events, heartbeat and release on disconnect:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain \
+  main/network_config.c tests/network_config_test.c -o /tmp/network-config-test
+/tmp/network-config-test
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain \
+  main/deskflow_protocol.c main/deskflow_keys.c tests/deskflow_protocol_test.c \
+  -o /tmp/deskflow-protocol-test
+/tmp/deskflow-protocol-test
+```
+
+FAT snapshot tests were exercised with generated FAT12, FAT16, FAT32 and
+MBR-partitioned images. Existing keyboard, orientation, screen and LED native
+tests also pass, alongside the ten Python console tests.
+
 
 Build with `idf.py build`. The descriptor parser has native tests covering
 standard layouts with and without report IDs, truncation, changed offsets,

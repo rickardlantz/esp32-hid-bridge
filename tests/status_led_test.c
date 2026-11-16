@@ -12,6 +12,14 @@ static void expect(led_pattern_t pattern, uint32_t time, bool red, bool green, b
 
 int main(void)
 {
+    assert(status_led_resolve(LED_LINK_CONNECTED, LED_LINK_SCANNING, LED_LINK_IDLE, true) == LED_PATTERN_ORANGE_BLINK);
+    assert(status_led_resolve(LED_LINK_SCANNING, LED_LINK_CONNECTED, LED_LINK_IDLE, true) == LED_PATTERN_ORANGE);
+    assert(status_led_resolve(LED_LINK_CONNECTED, LED_LINK_CONNECTED, LED_LINK_AUTHENTICATING, true) == LED_PATTERN_TURQUOISE_BLINK);
+    assert(status_led_resolve(LED_LINK_SCANNING, LED_LINK_CONNECTED, LED_LINK_CONNECTED, true) == LED_PATTERN_TURQUOISE);
+    assert(status_led_resolve(LED_LINK_IDLE, LED_LINK_CONNECTED, LED_LINK_CONNECTED, false) == LED_PATTERN_TURQUOISE);
+    assert(status_led_resolve(LED_LINK_CONNECTED, LED_LINK_IDLE, LED_LINK_CONNECTED, true) == LED_PATTERN_GREEN);
+    assert(status_led_resolve(LED_LINK_SCANNING, LED_LINK_IDLE, LED_LINK_IDLE, true) == LED_PATTERN_BLUE_FAST);
+    assert(status_led_resolve(LED_LINK_IDLE, LED_LINK_IDLE, LED_LINK_IDLE, false) == LED_PATTERN_RED);
     assert(status_led_pattern(LED_LINK_IDLE, false) == LED_PATTERN_RED);
     assert(status_led_pattern(LED_LINK_SCANNING, true) == LED_PATTERN_BLUE_FAST);
     assert(status_led_pattern(LED_LINK_AUTHENTICATING, true) == LED_PATTERN_BLUE_SLOW);
@@ -30,5 +38,17 @@ int main(void)
     expect(LED_PATTERN_BLUE_SLOW, 500, false, false, false);
     expect(LED_PATTERN_BLUE_SLOW, 999, false, false, false);
     expect(LED_PATTERN_BLUE_SLOW, 1000, false, false, true);
+    expect(LED_PATTERN_ORANGE_BLINK, 99, true, true, false);
+    expect(LED_PATTERN_ORANGE_BLINK, 100, false, false, false);
+    expect(LED_PATTERN_ORANGE_BLINK, 200, true, true, false);
+    expect(LED_PATTERN_ORANGE, 900, true, true, false);
+    expect(LED_PATTERN_TURQUOISE_BLINK, 499, false, true, true);
+    expect(LED_PATTERN_TURQUOISE_BLINK, 500, false, false, false);
+    expect(LED_PATTERN_TURQUOISE_BLINK, 1000, false, true, true);
+    expect(LED_PATTERN_TURQUOISE, 900, false, true, true);
+    led_color_t orange = status_led_color(LED_PATTERN_ORANGE, 0);
+    assert(orange.red > orange.green && !orange.blue);
+    led_color_t turquoise = status_led_color(LED_PATTERN_TURQUOISE, 0);
+    assert(!turquoise.red && turquoise.green && turquoise.blue);
     puts("status LED state and timing tests passed");
 }

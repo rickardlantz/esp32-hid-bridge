@@ -79,6 +79,20 @@ class ConsoleTest(unittest.TestCase):
             open_serial.assert_not_called()
             self.assertIn("ROM bootloader", c.notice)
 
+    def test_composite_storage_device_and_network_status(self):
+        c = Console()
+        device = port(pid=0x4007)
+        device.product = "ESP Input Bridge"
+        with patch("console.list_ports.comports", return_value=[device]), \
+             patch("console.serial.Serial", return_value=Mock()):
+            c.poll()
+            self.assertIsNotNone(c.connection)
+        c.log("Wi-Fi address: 192.0.2.10", device=True)
+        c.log("Deskflow ready", device=True)
+        self.assertEqual((c.wifi, c.deskflow), ("192.0.2.10", "ready"))
+        c.log("Deskflow screen entered", device=True)
+        self.assertEqual(c.deskflow, "active")
+
     def test_explicit_missing_port_does_not_open_another_device(self):
         c = Console(port="/dev/missing-bridge")
         with patch("console.list_ports.comports", return_value=[port()]), \

@@ -13,9 +13,26 @@ if ! command -v idf.py >/dev/null 2>&1; then
         esac
     done < <(bash "$HOME/.espressif/tools/activate_idf_v6.1.sh" -e)
 fi
-idf.py build
+bridge_idf_args=()
+if [[ $# -gt 0 ]]; then
+    if [[ $# -ne 2 || "$1" != "--board" ]]; then
+        echo "Usage: bash tools/flash.sh [--board lcd-147|lcd-147b]" >&2
+        exit 2
+    fi
+    case "$2" in
+        lcd-147) ;;
+        lcd-147b)
+            mkdir -p "$bridge_root/build/lcd-147b"
+            bridge_idf_args=(-B "$bridge_root/build/lcd-147b"
+                -D "SDKCONFIG=$bridge_root/build/lcd-147b/sdkconfig"
+                -D "SDKCONFIG_DEFAULTS=$bridge_root/sdkconfig.defaults;$bridge_root/sdkconfig.board-147b.defaults")
+            ;;
+        *) echo "Unknown board: $2" >&2; exit 2 ;;
+    esac
+fi
+idf.py "${bridge_idf_args[@]}" build
 bridge_port=$(python "$bridge_root/tools/enter_bootloader.py")
-idf.py -p "$bridge_port" flash
+idf.py "${bridge_idf_args[@]}" -p "$bridge_port" flash
 # Some S3 revisions remain in ROM after the USB Serial/JTAG RTS reset.
 # A watchdog reset exits that state without unplugging the USB stick.
 python - <<'PY'

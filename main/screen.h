@@ -12,6 +12,7 @@ typedef struct {
     bool usb_connected;
     uint32_t pin;
     char detail[25];
+    char network[25];
 } screen_status_t;
 
 // RGB565 in LCD wire byte order; clips all drawing to the requested strip.

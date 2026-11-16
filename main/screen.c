@@ -90,7 +90,9 @@ void screen_render_strip(uint16_t *pixels, int y, int rows,
             if (s->state == SCREEN_AUTH_FAILED) text(&c, "TRY PAIRING AGAIN", 107, 1, muted);
         }
         rect(&c, 12, 139, g->width - 24, 1, color(0x26364b));
-        text(&c, s->usb_connected ? "USB CONNECTED" : "USB WAITING", 146, 1,
+        char footer[48];
+        snprintf(footer, sizeof(footer), "%s  %s", s->usb_connected ? "USB READY" : "USB WAITING", s->network);
+        text(&c, footer, 146, 1,
             s->usb_connected ? color(0x34d399) : muted);
         text(&c, "BOOT TAP ROTATE   HOLD 3S PAIR", 160, 1, muted);
         return;
@@ -122,6 +124,7 @@ void screen_render_strip(uint16_t *pixels, int y, int rows,
     rect(&c, 14, 243, 144, 1, color(0x26364b));
     text(&c, s->usb_connected ? "USB CONNECTED" : "USB WAITING", 255, 1,
         s->usb_connected ? color(0x34d399) : muted);
+    text(&c, s->network, 268, 1, muted);
     text(&c, "BOOT TAP ROTATE", 280, 1, muted);
     text(&c, "HOLD 3S TO PAIR", 300, 1, muted);
 

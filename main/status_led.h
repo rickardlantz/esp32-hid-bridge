@@ -4,3 +4,5 @@
 void status_led_init(void);
 void status_led_set_link(led_link_state_t state);
 void status_led_set_usb(bool ready);
+void status_led_set_network(led_link_state_t state);
+void status_led_set_wifi(led_link_state_t state);

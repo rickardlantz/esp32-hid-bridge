@@ -1,4 +1,12 @@
 menu "Keyboard bridge"
+    choice BRIDGE_BOARD
+        prompt "Board model"
+        default BRIDGE_BOARD_LCD_147
+        config BRIDGE_BOARD_LCD_147
+            bool "ESP32-S3-LCD-1.47 (USB-A)"
+        config BRIDGE_BOARD_LCD_147B
+            bool "ESP32-S3-LCD-1.47B (USB-C, onboard QMI8658)"
+    endchoice
     config BRIDGE_KEYBOARD_NAME
         string "Exact BLE keyboard name (empty selects first keyboard)"
         default ""
@@ -7,19 +15,23 @@ menu "Keyboard bridge"
             The selected peer address is remembered in NVS.
     config BRIDGE_QMI8658
         bool "Enable optional QMI8658 accelerometer"
+        default y if BRIDGE_BOARD_LCD_147B
         default n
         help
+            The 1.47B has an onboard QMI8658. This option remains optional.
             The USB-A ESP32-S3-LCD-1.47 has no onboard accelerometer.
-            Enable only with an external QMI8658 on the configured header pins.
+            On USB-A, enable only with an external QMI8658 on the configured header pins.
             Missing/unresponsive hardware falls back to the portrait layout.
     if BRIDGE_QMI8658
         config BRIDGE_IMU_SDA
-            int "External accelerometer SDA GPIO"
-            range 1 13
+            int "Accelerometer SDA GPIO"
+            range 0 48
+            default 48 if BRIDGE_BOARD_LCD_147B
             default 1
         config BRIDGE_IMU_SCL
-            int "External accelerometer SCL GPIO"
-            range 1 13
+            int "Accelerometer SCL GPIO"
+            range 0 48
+            default 47 if BRIDGE_BOARD_LCD_147B
             default 2
         config BRIDGE_IMU_ADDRESS
             hex "QMI8658 I2C address"

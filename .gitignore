@@ -7,3 +7,10 @@ __pycache__/
 /logs/
 /.idea/
 /cmake-build-*/
+
+# Device configuration and TLS credentials copied from the USB drive
+/CONFIG.INI
+/config.ini
+/*.key
+/*.pem
+/*.crt

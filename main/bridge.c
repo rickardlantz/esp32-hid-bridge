@@ -1,6 +1,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdatomic.h>
+#include "device/dcd.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -8,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "tinyusb.h"
@@ -18,7 +21,15 @@
 #include "esp_hid_gap.h"
 #include "keyboard_layout.h"
 #include "display.h"
+#include "board.h"
 #include "status_led.h"
+#include "input_bridge.h"
+#include "mouse_report.h"
+#include "diagnostic_log.h"
+#include "config_storage.h"
+#include "wifi_manager.h"
+#include "deskflow_client.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "esp_private/usb_phy.h"
 #include "soc/rtc_cntl_reg.h"
@@ -26,6 +37,11 @@
 
 static const char *TAG = "bridge";
 static QueueHandle_t reports;
+static QueueHandle_t mouse_reports;
+static SemaphoreHandle_t source_lock;
+static bool network_focused;
+static uint8_t ble_report[8], network_report[8];
+static bridge_mouse_t last_mouse = {.id = 2};
 typedef struct { char text[256]; } log_line_t;
 static QueueHandle_t console_logs;
 static EventGroupHandle_t link_events;
@@ -73,7 +89,10 @@ static int console_log(const char *format, va_list args)
 {
     log_line_t line;
     int n = vsnprintf(line.text, sizeof(line.text), format, args);
-    if (n > 0) xQueueSend(console_logs, &line, 0);
+    if (n > 0) {
+        diagnostic_log_capture(line.text);
+        xQueueSend(console_logs, &line, 0);
+    }
     return n;
 }
 
@@ -92,18 +111,29 @@ static void log_task(void *arg)
     }
 }
 
-static const uint8_t report_descriptor[] = { TUD_HID_REPORT_DESC_KEYBOARD() };
+static atomic_uint usb_resets, usb_setups;
+void tud_event_hook_cb(uint8_t rhport, uint32_t event, bool in_isr)
+{
+    if (event == DCD_EVENT_BUS_RESET) atomic_fetch_add(&usb_resets, 1);
+    if (event == DCD_EVENT_SETUP_RECEIVED) atomic_fetch_add(&usb_setups, 1);
+}
+
+static const uint8_t report_descriptor[] = {
+    TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(1)),
+    TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(3)),
+};
 static const uint8_t config_descriptor[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 3, 0,
-        TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_HID_DESC_LEN, 0, 100),
+    TUD_CONFIG_DESCRIPTOR(1, 4, 0,
+        TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_HID_DESC_LEN + TUD_MSC_DESC_LEN, 0, 250),
     TUD_CDC_DESCRIPTOR(0, 4, 0x81, 8, 0x02, 0x82, 64),
-    TUD_HID_DESCRIPTOR(2, 5, HID_ITF_PROTOCOL_KEYBOARD,
-        sizeof(report_descriptor), 0x83, 8, 1),
+    TUD_HID_DESCRIPTOR(2, 5, HID_ITF_PROTOCOL_NONE,
+        sizeof(report_descriptor), 0x83, 16, 1),
+    TUD_MSC_DESCRIPTOR(3, 7, 0x04, 0x84, 64),
 };
 static char serial[13];
 static const char *strings[] = {
-    (const char[]){0x09, 0x04}, "ESP Bridge", "BLE USB Keyboard", serial,
-    "Bridge console", "Keyboard"
+    (const char[]){0x09, 0x04}, "ESP Bridge", "ESP Input Bridge", serial,
+    "Bridge console", "Keyboard", "Mouse", "Configuration storage"
 };
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
@@ -114,7 +144,13 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t id,
     hid_report_type_t type, uint8_t *buffer, uint16_t length)
 {
-    if (id || type != HID_REPORT_TYPE_INPUT) return 0;
+    if (instance || type != HID_REPORT_TYPE_INPUT) return 0;
+    if (id == 3) {
+        uint16_t n = length < 5 ? length : 5;
+        memset(buffer, 0, n);
+        return n;
+    }
+    if (id != 1 && id != 0) return 0;
     uint16_t n = length < 8 ? length : 8;
     portENTER_CRITICAL(&report_lock);
     memcpy(buffer, current_report, n);
@@ -128,7 +164,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t id,
     // Host LED output (Caps/Num/Scroll Lock) is currently not forwarded.
 }
 
-static void submit(const uint8_t *data)
+static void queue_keyboard(const uint8_t *data)
 {
     keyboard_report_t r = {0};
     if (data) memcpy(r.bytes, data, sizeof(r.bytes));
@@ -140,6 +176,58 @@ static void submit(const uint8_t *data)
         xQueueSend(reports, &r, 0);
         ESP_LOGW(TAG, "USB queue overflow; released keys");
     }
+}
+
+static void submit(const uint8_t *data)
+{
+    xSemaphoreTake(source_lock, portMAX_DELAY);
+    if (data) memcpy(ble_report, data, 8); else memset(ble_report, 0, 8);
+    if (!network_focused) queue_keyboard(ble_report);
+    xSemaphoreGive(source_lock);
+}
+void input_bridge_network_keyboard(const uint8_t report[8])
+{
+    xSemaphoreTake(source_lock, portMAX_DELAY);
+    memcpy(network_report, report, 8);
+    if (network_focused) queue_keyboard(report);
+    xSemaphoreGive(source_lock);
+}
+static void queue_mouse(const bridge_mouse_t *report)
+{
+    if (xQueueSend(mouse_reports, report, 0) != pdTRUE) {
+        xQueueReset(mouse_reports);
+        bridge_mouse_t release = *report; release.buttons = 0; release.wheel = release.pan = 0;
+        if (release.id == 2) release.x = release.y = 0;
+        xQueueSend(mouse_reports, &release, 0);
+        xQueueSend(mouse_reports, report, 0);
+        ESP_LOGW(TAG, "Mouse queue overflow; released buttons");
+    }
+    last_mouse = *report;
+}
+void input_bridge_network_mouse(const bridge_mouse_t *report)
+{
+    xSemaphoreTake(source_lock, portMAX_DELAY);
+    if (network_focused) queue_mouse(report);
+    xSemaphoreGive(source_lock);
+}
+void input_bridge_network_focus(bool active)
+{
+    xSemaphoreTake(source_lock, portMAX_DELAY);
+    if (network_focused != active) {
+        network_focused = active;
+        xQueueReset(reports); queue_keyboard(NULL);
+        queue_keyboard(active ? network_report : ble_report);
+        xQueueReset(mouse_reports);
+        bridge_mouse_t release = last_mouse; release.buttons = 0; release.wheel = release.pan = 0;
+        if (release.id == 2) release.x = release.y = 0;
+        queue_mouse(&release);
+    }
+    xSemaphoreGive(source_lock);
+}
+void input_bridge_network_ready(bool ready)
+{
+    if (!ready) input_bridge_network_focus(false);
+    status_led_set_network(ready ? LED_LINK_CONNECTED : LED_LINK_IDLE);
 }
 
 static void hid_event(void *arg, esp_event_base_t base, int32_t event, void *data)
@@ -272,13 +360,31 @@ static void usb_task(void *arg)
     keyboard_report_t pending = {0};
     bool dirty = true;
     bool was_mounted = false;
+    bridge_mouse_t pending_mouse = {0};
+    bool mouse_dirty = false;
+    int previous_state = -1;
+    unsigned last_resets = 0, last_setups = 0;
+    uint32_t last_enumeration_log = 0;
     for (;;) {
         bool mounted = tud_mounted() && !tud_suspended();
+        int usb_state = (tud_mounted() ? 1 : 0) | (tud_suspended() ? 2 : 0) | (tud_hid_n_get_protocol(0) << 2);
+        if (usb_state != previous_state) {
+            ESP_LOGI(TAG, "USB state mounted=%u suspended=%u protocol=%u", tud_mounted(), tud_suspended(), tud_hid_n_get_protocol(0));
+            previous_state = usb_state;
+        }
+        unsigned resets = atomic_load(&usb_resets), setups = atomic_load(&usb_setups);
+        uint32_t now_ms = esp_timer_get_time()/1000;
+        if (!mounted && (resets != last_resets || setups != last_setups) && now_ms - last_enumeration_log >= 2000) {
+            ESP_LOGI(TAG, "USB enumeration resets=%u setup_requests=%u", resets, setups);
+            last_resets = resets; last_setups = setups; last_enumeration_log = now_ms;
+        }
         display_usb(mounted);
         status_led_set_usb(mounted);
         if (!mounted) {
             // Never replay buffered keystrokes when a PC reconnects.
             xQueueReset(reports);
+            xQueueReset(mouse_reports);
+            mouse_dirty = false;
             memset(&pending, 0, sizeof(pending));
             portENTER_CRITICAL(&report_lock);
             memset(current_report, 0, sizeof(current_report));
@@ -286,8 +392,8 @@ static void usb_task(void *arg)
             dirty = true;
         } else {
             if (!was_mounted) dirty = true;
-            if (dirty && tud_hid_ready()) {
-                if (tud_hid_report(0, pending.bytes, 8)) {
+            if (dirty && tud_hid_n_ready(0)) {
+                if (tud_hid_n_report(0, tud_hid_n_get_protocol(0) == HID_PROTOCOL_BOOT ? 0 : 1, pending.bytes, 8)) {
                     portENTER_CRITICAL(&report_lock);
                     memcpy(current_report, pending.bytes, 8);
                     portEXIT_CRITICAL(&report_lock);
@@ -295,12 +401,54 @@ static void usb_task(void *arg)
                 }
             }
             if (!dirty && xQueueReceive(reports, &pending, 0) == pdTRUE) dirty = true;
+            if (!dirty && tud_hid_n_get_protocol(0) != HID_PROTOCOL_BOOT && tud_hid_n_ready(0)) {
+                if (!mouse_dirty) mouse_dirty = xQueueReceive(mouse_reports, &pending_mouse, 0) == pdTRUE;
+                if (mouse_dirty) {
+                    bridge_mouse_t remaining = pending_mouse;
+                    uint8_t data[5];
+                    bool more = mouse_report_next(&remaining, data);
+                    if (tud_hid_n_report(0, 3, data, sizeof(data))) {
+                        pending_mouse = remaining; mouse_dirty = more;
+                        if ((int8_t)data[1] || (int8_t)data[2]) {
+                            static uint32_t sent, last_log;
+                            uint32_t now = esp_timer_get_time()/1000;
+                            if (!sent++ || now - last_log >= 2000) {
+                                ESP_LOGI(TAG, "USB pointer sent=%lu dx=%d dy=%d protocol=%u",
+                                    (unsigned long)sent, (int8_t)data[1], (int8_t)data[2], tud_hid_n_get_protocol(0));
+                                last_log = now;
+                            }
+                        }
+                    }
+                }
+            }
         }
         was_mounted = mounted;
         // One full scheduler tick: pdMS_TO_TICKS(1) is zero at IDF's 100 Hz
         // default and would starve the BLE, console and display tasks.
         vTaskDelay(1);
     }
+}
+
+// An explicit diagnostic independent of Deskflow coordinates and focus.
+static void mouse_test_task(void *arg)
+{
+    while (!tud_mounted() || tud_suspended()) vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    display_network("USB MOUSE TEST");
+    ESP_LOGI(TAG, "USB mouse test: 80-pixel square, no clicks");
+    static const int8_t directions[4][2] = {{8,0},{0,8},{-8,0},{0,-8}};
+    for (unsigned side = 0; side < 4 && tud_mounted(); side++) {
+        for (unsigned step = 0; step < 10 && tud_mounted(); step++) {
+            bridge_mouse_t report = {.id=2, .x=directions[side][0], .y=directions[side][1]};
+            xSemaphoreTake(source_lock, portMAX_DELAY);
+            queue_mouse(&report);
+            xSemaphoreGive(source_lock);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+    }
+    display_network("USB TEST COMPLETE");
+    ESP_LOGI(TAG, "USB mouse test complete");
+    vTaskDelete(NULL);
 }
 
 static void console_task(void *arg)
@@ -343,6 +491,29 @@ static void console_task(void *arg)
                 }
                 ESP_LOGI(TAG, "Orientation %s; accelerometer %s", orientation_name(display_get_orientation()),
                     display_accelerometer_available() ? "available" : "absent/disabled");
+            } else if (strcmp(command, "reload") == 0) {
+                config_storage_reload();
+                ESP_LOGI(TAG, "Configuration reload requested");
+            } else if (strcmp(command, "network") == 0) {
+                wifi_manager_status(); deskflow_client_status();
+            } else if (strcmp(command, "trace on") == 0) {
+                diagnostic_log_enable(true);
+            } else if (strcmp(command, "trace off") == 0) {
+                diagnostic_log_enable(false);
+            } else if (strcmp(command, "trace clear") == 0) {
+                diagnostic_log_clear();
+            } else if (strcmp(command, "trace dump") == 0) {
+                diagnostic_log_dump();
+            } else if (strcmp(command, "mouse-test") == 0) {
+                ESP_ERROR_CHECK(xTaskCreate(mouse_test_task, "mouse_test", 3072, NULL, 1, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+            } else if (strcmp(command, "mouse-test-next") == 0) {
+                ESP_ERROR_CHECK(nvs_set_u8(settings, "mouse_test", 1));
+                ESP_ERROR_CHECK(nvs_commit(settings));
+                ESP_LOGI(TAG, "USB mouse test armed for the next boot; starts five seconds after USB connects");
+            } else if (strcmp(command, "restart") == 0) {
+                ESP_LOGI(TAG, "Restart requested");
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
             } else if (strcmp(command, "bootloader") == 0) {
                 enter_bootloader();
             } else if (strcmp(command, "forget") == 0) {
@@ -364,9 +535,11 @@ static void console_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(1500));
                 esp_restart();
             } else {
+                ESP_LOGI(TAG, "Board: %s", BOARD_NAME);
                 ESP_LOGI(TAG, "Keyboard %s. Orientation %s; accelerometer %s. Commands: forget, bootloader, orientation <mode>",
                     (xEventGroupGetBits(link_events) & LINK_UP) ? "connected" : "disconnected",
                     orientation_name(display_get_orientation()), display_accelerometer_available() ? "available" : "absent/disabled");
+                wifi_manager_status(); deskflow_client_status();
             }
         } else if (used < sizeof(command) - 1) {
             command[used++] = c;
@@ -385,14 +558,18 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(gpio_config(&boot));
     ESP_ERROR_CHECK(nvs_flash_init());
+    diagnostic_log_init();
     display_init();
     ESP_ERROR_CHECK(nvs_open("bridge", NVS_READWRITE, &settings));
     size_t n = sizeof(peer);
     have_peer = nvs_get_blob(settings, "peer", peer, &n) == ESP_OK && n == 6;
     reports = xQueueCreate(64, sizeof(keyboard_report_t));
+    mouse_reports = xQueueCreate(128, sizeof(bridge_mouse_t));
+    source_lock = xSemaphoreCreateMutex();
     console_logs = xQueueCreate(16, sizeof(log_line_t));
     link_events = xEventGroupCreate();
-    assert(reports && link_events && console_logs);
+    assert(reports && mouse_reports && source_lock && link_events && console_logs);
+    config_storage_init();
 
     uint8_t mac[6];
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_STA));
@@ -407,7 +584,7 @@ void app_main(void)
     ESP_ERROR_CHECK(tinyusb_cdcacm_init(&cdc));
     ESP_ERROR_CHECK(xTaskCreate(log_task, "console_logs", 3072, NULL, 1, &log_task_handle) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     esp_log_set_vprintf(console_log);
-    ESP_LOGI(TAG, "BLE -> USB keyboard bridge; pairing PIN appears on this console");
+    ESP_LOGI(TAG, "Board: %s; BLE/Deskflow -> USB input bridge", BOARD_NAME);
     ESP_ERROR_CHECK(esp_hid_gap_init(HID_HOST_MODE));
     uint8_t auth = ESP_LE_AUTH_REQ_SC_MITM_BOND;
     uint8_t io = ESP_IO_CAP_OUT;
@@ -424,4 +601,12 @@ void app_main(void)
     ESP_ERROR_CHECK(xTaskCreate(usb_task, "usb_reports", 3072, NULL, 4, &usb_task_handle) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(scan_task, "keyboard_scan", 6144, NULL, 2, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(console_task, "console", 4096, NULL, 1, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    wifi_manager_start();
+    deskflow_client_start();
+    uint8_t mouse_test = 0;
+    if (nvs_get_u8(settings, "mouse_test", &mouse_test) == ESP_OK && mouse_test) {
+        ESP_ERROR_CHECK(nvs_erase_key(settings, "mouse_test"));
+        ESP_ERROR_CHECK(nvs_commit(settings));
+        ESP_ERROR_CHECK(xTaskCreate(mouse_test_task, "mouse_test", 3072, NULL, 1, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    }
 }

@@ -19,6 +19,7 @@ except ImportError:
                      "Or run with ~/.espressif/tools/python/v6.1/venv/bin/python")
 
 MODES = ("auto", "portrait", "landscape", "portrait-inverted", "landscape-inverted")
+APP_PIDS = (0x4005, 0x4007)
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -40,6 +41,7 @@ class Console:
         self.identity = None
         self.notice = "Waiting for the bridge"
         self.keyboard, self.orientation, self.imu, self.pin = "unknown", "unknown", "unknown", ""
+        self.wifi, self.deskflow = "unknown", "unknown"
         self.lines = deque(maxlen=2000)
         self.pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
@@ -83,6 +85,18 @@ class Console:
                 self.pin = match[1]
             if "AUTH SUCCESS" in message or "AUTH ERROR" in message:
                 self.pin = ""
+            match = re.search(r"Wi-Fi (?:address: )?([0-9.]+|offline)", message)
+            if match:
+                self.wifi = match[1]
+            if "Trying Wi-Fi profile" in message:
+                self.wifi = "connecting"
+            match = re.search(r"Deskflow (ready|active|disconnected)", message)
+            if match:
+                self.deskflow = match[1]
+            if "Deskflow screen entered" in message:
+                self.deskflow = "active"
+            elif "Deskflow screen left" in message:
+                self.deskflow = "ready"
 
     def inform(self, message):
         if self.notice != message:
@@ -103,9 +117,9 @@ class Console:
             if not self.identity:
                 self.inform("Waiting for " + self.port_hint)
                 return None
-        apps = [p for p in ports if (p.vid, p.pid) == (0x303A, 0x4005)
+        apps = [p for p in ports if p.vid == 0x303A and p.pid in APP_PIDS
                 and (not self.identity or identity_key(p.serial_number) == self.identity)
-                and getattr(p, "product", None) in (None, "BLE USB Keyboard")]
+                and getattr(p, "product", None) in (None, "BLE USB Keyboard", "ESP Input Bridge")]
         if len(apps) > 1:
             self.inform("Multiple bridges found; restart with --port /dev/serial/by-id/...")
         elif apps:
@@ -122,6 +136,7 @@ class Console:
         self.connection = None
         self.pin = ""
         self.keyboard = "unknown"
+        self.wifi, self.deskflow = "unknown", "unknown"
         self.pending = ""
         self.decoder.reset()
 
@@ -241,7 +256,8 @@ def tui(window, console):
         else:
             put(1, console.port + ("  [RECORDING]" if console.recording else ""))
             put(2, f"Keyboard: {console.keyboard} | View: {console.orientation} | IMU: {console.imu}")
-            put(3, f"PAIRING PIN: {console.pin}  Type on keyboard, then Enter" if console.pin else "Live device logs (timestamps in UTC)", curses.A_BOLD if console.pin else 0)
+            put(3, f"PAIRING PIN: {console.pin}  Type on keyboard, then Enter" if console.pin else
+                f"Wi-Fi: {console.wifi} | Deskflow: {console.deskflow} | Logs in UTC", curses.A_BOLD if console.pin else 0)
             put(4, "─" * (width - 1))
             wrapped = [part for line in console.lines for part in textwrap.wrap(line[11:], width - 2) or [""]]
             rows = height - 10
@@ -250,7 +266,7 @@ def tui(window, console):
             for y, line in enumerate(wrapped[max(0, end - rows):end], 5):
                 put(y, line)
             put(height - 5, "─" * (width - 1))
-            put(height - 4, "S status  O orientation  R reconnect  D dump logs  L record")
+            put(height - 4, "S status  O orientation  N network  C reload  R reconnect  D dump  L record")
             put(height - 3, "F forget  B bootloader  : command  PgUp/PgDn scroll  End live  Q quit")
             put(height - 2, "> " + command if command is not None else
                 f"Send {confirm}? Y confirms, Esc cancels" if confirm else console.notice)
@@ -295,6 +311,10 @@ def tui(window, console):
             return
         elif key in (ord('s'), ord('S')):
             console.send("status")
+        elif key in (ord('n'), ord('N')):
+            console.send("network")
+        elif key in (ord('c'), ord('C')):
+            console.send("reload")
         elif key in (ord('o'), ord('O')):
             menu = True
         elif key in (ord('r'), ord('R')):

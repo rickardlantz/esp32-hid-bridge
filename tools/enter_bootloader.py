@@ -7,7 +7,8 @@ from serial.tools import list_ports
 
 
 def find(pid):
-    matches = [p for p in list_ports.comports() if p.vid == 0x303A and p.pid == pid]
+    pids = pid if isinstance(pid, tuple) else (pid,)
+    matches = [p for p in list_ports.comports() if p.vid == 0x303A and p.pid in pids]
     if len(matches) > 1:
         raise SystemExit("Multiple ESP devices found; connect only the intended bridge.")
     return matches[0].device if matches else None
@@ -18,7 +19,7 @@ def main():
     if rom:
         print(rom)
         return
-    port = sys.argv[1] if len(sys.argv) > 1 else find(0x4005)
+    port = sys.argv[1] if len(sys.argv) > 1 else find((0x4005, 0x4007))
     if not port:
         raise SystemExit("Bridge not found. For initial recovery, hold BOOT while reconnecting USB.")
     try:

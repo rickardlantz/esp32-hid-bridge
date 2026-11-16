@@ -1,4 +1,5 @@
 #include "display.h"
+#include "board.h"
 #include <string.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
@@ -15,13 +16,6 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-// Waveshare ESP32-S3-LCD-1.47 (USB-A, non-touch), not the 1.47B.
-#define LCD_MOSI 45
-#define LCD_CLK 40
-#define LCD_CS 42
-#define LCD_DC 41
-#define LCD_RST 39
-#define LCD_BL 48
 #define STRIP_ROWS 16
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static screen_status_t status;
@@ -98,6 +92,13 @@ void display_usb(bool connected)
     if (status.usb_connected != connected) { status.usb_connected = connected; revision++; }
     portEXIT_CRITICAL(&state_lock);
 }
+void display_network(const char *message)
+{
+    char value[25]; snprintf(value, sizeof(value), "%s", message ? message : "");
+    portENTER_CRITICAL(&state_lock);
+    if (strcmp(status.network, value)) { strcpy(status.network, value); revision++; }
+    portEXIT_CRITICAL(&state_lock);
+}
 static bool transfer_complete(esp_lcd_panel_io_handle_t io,
     esp_lcd_panel_io_event_data_t *event, void *arg)
 {
@@ -159,7 +160,7 @@ static void display_task(void *arg)
         if (current != drawn) {
             display_geometry_t geometry = orientation_geometry(rotation);
             if (rotation != applied) {
-                gpio_set_level(LCD_BL, 0);
+                gpio_set_level(BOARD_LCD_BL, 0);
                 ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel, geometry.swap_xy));
                 ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, geometry.mirror_x, geometry.mirror_y));
                 ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel, geometry.x_gap, geometry.y_gap));
@@ -174,7 +175,7 @@ static void display_task(void *arg)
                 ESP_ERROR_CHECK(xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT);
             }
             drawn = current;
-            gpio_set_level(LCD_BL, 1);
+            gpio_set_level(BOARD_LCD_BL, 1);
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -187,11 +188,11 @@ void display_init(void)
         orientation_mode = saved_mode;
         if (saved_mode != DISPLAY_ORIENTATION_AUTO) orientation = saved_mode;
     }
-    gpio_config_t output = { .pin_bit_mask = 1ULL << LCD_BL, .mode = GPIO_MODE_OUTPUT };
+    gpio_config_t output = { .pin_bit_mask = 1ULL << BOARD_LCD_BL, .mode = GPIO_MODE_OUTPUT };
     ESP_ERROR_CHECK(gpio_config(&output));
-    gpio_set_level(LCD_BL, 0);
+    gpio_set_level(BOARD_LCD_BL, 0);
     spi_bus_config_t bus = {
-        .mosi_io_num = LCD_MOSI, .miso_io_num = -1, .sclk_io_num = LCD_CLK,
+        .mosi_io_num = BOARD_LCD_MOSI, .miso_io_num = -1, .sclk_io_num = BOARD_LCD_CLK,
         .quadwp_io_num = -1, .quadhd_io_num = -1,
         .max_transfer_sz = 320 * STRIP_ROWS * 2,
     };
@@ -200,14 +201,14 @@ void display_init(void)
     strip = heap_caps_malloc(320 * STRIP_ROWS * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     assert(transfer_done && strip);
     esp_lcd_panel_io_spi_config_t io = {
-        .cs_gpio_num = LCD_CS, .dc_gpio_num = LCD_DC, .spi_mode = 0,
+        .cs_gpio_num = BOARD_LCD_CS, .dc_gpio_num = BOARD_LCD_DC, .spi_mode = 0,
         .pclk_hz = 40000000, .trans_queue_depth = 1,
         .on_color_trans_done = transfer_complete, .lcd_cmd_bits = 8, .lcd_param_bits = 8,
     };
     esp_lcd_panel_io_handle_t handle;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io, &handle));
     esp_lcd_panel_dev_config_t config = {
-        .reset_gpio_num = LCD_RST, .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .reset_gpio_num = BOARD_LCD_RST, .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(handle, &config, &panel));
